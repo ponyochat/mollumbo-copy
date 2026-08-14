@@ -1,6 +1,6 @@
 // ==UserScript==
 // @name         몰름보 카피
-// @namespace    https://github.com/ponyochat/mollumbo-copy/stable
+// @namespace    https://github.com/milkyway0308
 // @version      2.1.0
 // @author       milkyway0308
 // @description  크랙 스토리를 비공개 복사하고 미디어 버전을 변경합니다.
