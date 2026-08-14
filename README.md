@@ -4,7 +4,7 @@
 
 ## 설치
 
-[몰름보 카피 본서버 설치하기](https://raw.githubusercontent.com/ponyochat/mollumbo-copy/main/stable/mollumbo-copy.user.js)
+[몰름보 카피 본서버 설치하기](https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js)
 
 이 버전만 설치하면 돼. 새 버전이 올라오면 템퍼몽키가 업데이트를 확인해.
 

@@ -4,8 +4,8 @@
 // @version      2.1.0
 // @author       milkyway0308
 // @description  크랙 스토리를 비공개 복사하고 미디어 버전을 변경합니다.
-// @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/main/stable/mollumbo-copy.user.js
-// @downloadURL  https://raw.githubusercontent.com/ponyochat/mollumbo-copy/main/stable/mollumbo-copy.user.js
+// @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
+// @downloadURL  https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
 // @match        https://crack.wrtn.ai/*
 // @connect      d394jeh9729epj.cloudfront.net
 // @connect      cdn-image.static.wrtn.ai
