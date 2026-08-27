@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         몰름보 카피
 // @namespace    https://github.com/milkyway0308
-// @version      4.0.0
+// @version      4.1
 // @author       milkyway0308
 // @description  크랙 스토리를 비공개 복사하고 미디어 버전을 변경하며, 작품별 수정·삭제 잠금을 지원합니다.
 // @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
@@ -61,7 +61,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
 })();
 
-// 몰름보 카피 4.0 - 작품별 수정/삭제 잠금 기능
+// 몰름보 카피 4.1 - 작품별 수정/삭제 잠금 기능
 (function () {
     'use strict';
 
@@ -69,6 +69,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
     const LOCK_MENU_ATTRIBUTE = 'data-mollumbo-lock-menu';
     const LOCK_BADGE_ATTRIBUTE = 'data-mollumbo-lock-badge';
     const CARD_STORY_ID_ATTRIBUTE = 'data-mollumbo-story-id';
+    const CARD_SIGNATURE_PREFIX = 'mollumbo-copy:card-signature:v1:';
     const deleteGuards = new WeakMap();
     let menuCheckScheduled = false;
 
@@ -99,6 +100,56 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         } catch {
             return false;
         }
+    }
+
+    function cardSignatureStorageKey(storyId) {
+        return `${CARD_SIGNATURE_PREFIX}${storyId}`;
+    }
+
+    function normalizeThumbnailUrl(image) {
+        const source = image?.currentSrc || image?.src || image?.getAttribute?.('src') || '';
+        try {
+            const url = new URL(source, location.href);
+            const wrappedSource = url.pathname.match(/\/https?:\/\/(.+)$/)?.[0];
+            return wrappedSource ? decodeURIComponent(wrappedSource.slice(1)) : `${url.origin}${url.pathname}`;
+        } catch {
+            return source;
+        }
+    }
+
+    function cardSignature(card) {
+        const image = card?.querySelector?.('img[alt="character_thumbnail"]');
+        if (!image) return null;
+        return JSON.stringify({
+            image: normalizeThumbnailUrl(image),
+            text: normalizeLabel(card.textContent)
+        });
+    }
+
+    function saveCardSignature(storyId, card) {
+        const signature = cardSignature(card);
+        if (!signature) return;
+        try {
+            localStorage.setItem(cardSignatureStorageKey(storyId), signature);
+        } catch {
+            // 브라우저 저장 공간을 사용할 수 없으면 현재 화면에서만 표시합니다.
+        }
+    }
+
+    function findStoryIdByCardSignature(card) {
+        const signature = cardSignature(card);
+        if (!signature) return null;
+        try {
+            for (let index = 0; index < localStorage.length; index += 1) {
+                const key = localStorage.key(index);
+                if (!key?.startsWith(CARD_SIGNATURE_PREFIX)) continue;
+                if (localStorage.getItem(key) !== signature) continue;
+                return key.slice(CARD_SIGNATURE_PREFIX.length);
+            }
+        } catch {
+            return null;
+        }
+        return null;
     }
 
     function isVisible(element) {
@@ -218,6 +269,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             const card = findThumbnailCard(thumbnails[0]);
             if (!card || !card.contains(expandedButton)) continue;
             card.setAttribute(CARD_STORY_ID_ATTRIBUTE, storyId);
+            saveCardSignature(storyId, card);
             return card;
         }
         return null;
@@ -272,6 +324,10 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                     storyId = info.id;
                     card.setAttribute(CARD_STORY_ID_ATTRIBUTE, storyId);
                 }
+            }
+            if (!storyId) {
+                storyId = findStoryIdByCardSignature(card);
+                if (storyId) card.setAttribute(CARD_STORY_ID_ATTRIBUTE, storyId);
             }
             setThumbnailLockBadge(card, Boolean(storyId && isStoryLocked(storyId)));
         }
