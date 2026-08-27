@@ -67,6 +67,8 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
     const LOCK_STORAGE_PREFIX = 'mollumbo-copy:story-lock:v1:';
     const LOCK_MENU_ATTRIBUTE = 'data-mollumbo-lock-menu';
+    const LOCK_BADGE_ATTRIBUTE = 'data-mollumbo-lock-badge';
+    const CARD_STORY_ID_ATTRIBUTE = 'data-mollumbo-story-id';
     const deleteGuards = new WeakMap();
     let menuCheckScheduled = false;
 
@@ -142,7 +144,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         return nested?.closest?.('button, [role="menuitem"], [role="button"]') ?? nested ?? null;
     }
 
-    function findStoryInfo(container) {
+    function findStoryInfo(container, includeSurroundings = true) {
         if (!container) return null;
         const seen = new Set();
         let visits = 0;
@@ -172,14 +174,16 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             return null;
         }
 
-        const candidates = [];
-        for (let element = container, depth = 0; element && depth < 7; element = element.parentElement, depth += 1) {
-            candidates.push(element);
+        const candidates = [container];
+        if (includeSurroundings) {
+            for (let element = container.parentElement, depth = 1; element && depth < 7; element = element.parentElement, depth += 1) {
+                candidates.push(element);
+            }
         }
         for (const element of Array.from(container.querySelectorAll?.('*') ?? []).slice(0, 40)) {
             candidates.push(element);
         }
-        const expandedButton = document.querySelector('[aria-expanded="true"]');
+        const expandedButton = includeSurroundings ? document.querySelector('[aria-expanded="true"]') : null;
         if (expandedButton) {
             for (let element = expandedButton, depth = 0; element && depth < 8; element = element.parentElement, depth += 1) {
                 candidates.push(element);
@@ -193,6 +197,84 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             }
         }
         return null;
+    }
+
+    function findThumbnailCard(image) {
+        if (!(image instanceof Element)) return null;
+        for (let element = image.parentElement, depth = 0; element && depth < 7; element = element.parentElement, depth += 1) {
+            const thumbnailCount = element.querySelectorAll('img[alt="character_thumbnail"]').length;
+            if (thumbnailCount > 1) return null;
+            if (thumbnailCount === 1 && element.querySelector('button')) return element;
+        }
+        return null;
+    }
+
+    function associateOpenMenuWithCard(storyId) {
+        const expandedButton = document.querySelector('[aria-expanded="true"]');
+        if (!(expandedButton instanceof Element)) return null;
+        for (let element = expandedButton.parentElement, depth = 0; element && depth < 8; element = element.parentElement, depth += 1) {
+            const thumbnails = element.querySelectorAll('img[alt="character_thumbnail"]');
+            if (thumbnails.length !== 1) continue;
+            const card = findThumbnailCard(thumbnails[0]);
+            if (!card || !card.contains(expandedButton)) continue;
+            card.setAttribute(CARD_STORY_ID_ATTRIBUTE, storyId);
+            return card;
+        }
+        return null;
+    }
+
+    function setThumbnailLockBadge(card, locked) {
+        const image = card?.querySelector?.('img[alt="character_thumbnail"]');
+        const frame = image?.parentElement;
+        if (!frame) return;
+        const existingBadge = frame.querySelector(`[${LOCK_BADGE_ATTRIBUTE}]`);
+        if (!locked) {
+            existingBadge?.remove();
+            return;
+        }
+        if (existingBadge) return;
+
+        const badge = document.createElement('span');
+        badge.setAttribute(LOCK_BADGE_ATTRIBUTE, 'true');
+        badge.setAttribute('aria-label', '잠긴 작품');
+        badge.textContent = '🔒';
+        badge.style.cssText = [
+            'position:absolute',
+            'top:4px',
+            'left:4px',
+            'z-index:30',
+            'display:flex',
+            'width:22px',
+            'height:22px',
+            'align-items:center',
+            'justify-content:center',
+            'border-radius:9999px',
+            'background:rgba(0,0,0,.72)',
+            'box-shadow:0 1px 4px rgba(0,0,0,.35)',
+            'font-size:13px',
+            'line-height:1',
+            'pointer-events:none',
+            'user-select:none'
+        ].join(';');
+        frame.appendChild(badge);
+    }
+
+    function refreshThumbnailLocks() {
+        if (!/^\/my(\/.*)?$/.test(location.pathname)) return;
+        const images = Array.from(document.querySelectorAll('img[alt="character_thumbnail"]'));
+        for (const image of images) {
+            const card = findThumbnailCard(image);
+            if (!card) continue;
+            let storyId = card.getAttribute(CARD_STORY_ID_ATTRIBUTE);
+            if (!storyId) {
+                const info = findStoryInfo(card, false);
+                if (info && (!info.type || info.type === 'story')) {
+                    storyId = info.id;
+                    card.setAttribute(CARD_STORY_ID_ATTRIBUTE, storyId);
+                }
+            }
+            setThumbnailLockBadge(card, Boolean(storyId && isStoryLocked(storyId)));
+        }
     }
 
     function showLockedDeleteAlert() {
@@ -239,6 +321,8 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         const locked = isStoryLocked(storyId);
         lockItem.textContent = locked ? '🔒 잠금해제' : '🔓 잠금';
         setDeleteLocked(menu, locked);
+        associateOpenMenuWithCard(storyId);
+        refreshThumbnailLocks();
     }
 
     function decorateOpenMenu() {
@@ -284,7 +368,11 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         setTimeout(() => {
             menuCheckScheduled = false;
             decorateOpenMenu();
-            setTimeout(decorateOpenMenu, 100);
+            refreshThumbnailLocks();
+            setTimeout(() => {
+                decorateOpenMenu();
+                refreshThumbnailLocks();
+            }, 100);
         }, 0);
     }
 
@@ -313,7 +401,10 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         document.addEventListener('click', blockLockedBuilderModify, true);
         document.addEventListener('click', scheduleMenuCheck);
         window.addEventListener('popstate', scheduleMenuCheck);
+        window.addEventListener('scroll', scheduleMenuCheck, { passive: true });
         scheduleMenuCheck();
+        setTimeout(scheduleMenuCheck, 500);
+        setTimeout(scheduleMenuCheck, 1500);
     }
 
     if (document.readyState === 'loading') {
