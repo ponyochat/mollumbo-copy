@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         몰름보 카피
 // @namespace    https://github.com/milkyway0308
-// @version      3.0.0
+// @version      4.0.0
 // @author       milkyway0308
-// @description  크랙 스토리를 비공개 복사하고 미디어 버전을 변경합니다.
+// @description  크랙 스토리를 비공개 복사하고 미디어 버전을 변경하며, 작품별 수정·삭제 잠금을 지원합니다.
 // @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
 // @downloadURL  https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
 // @match        https://crack.wrtn.ai/*
@@ -59,4 +59,266 @@ ${o.slice(0,4e3)}`,1e4),console.error(s.error);return}try{const o=s.value.asWrit
 ${c.slice(0,4e3)}`,1e4),console.error(a.error);return}const d=await v().getDetail(n.id);if(!d.ok){g().doToastifyAlert("미디어 형식은 저장했지만 결과를 확인하지 못했어요.",1e4);return}if(d.value.imageVersion!==(e?"v1":"v2")){g().doToastifyAlert("미디어 버전이 제대로 저장되지 않았어요.",1e4);return}if(!samePlayGuides(o.sets,d.value.startingSets)){g().doToastifyAlert("미디어 버전은 바뀌었지만 플레이 가이드가 정상적으로 유지되지 않았어요.",1e4);return}if(hadMovingCover){let u=false;for(const p of movingCoverCandidates(d.value))try{const w=await bt(p.url);if(await isAnimatedCoverBlob(w.blob,p)){u=true;break}}catch(w){console.warn("미디어 변경 후 움직이는 표지 확인 실패",p.url,w)}if(!u){g().doToastifyAlert("미디어 버전은 바뀌었지만 움직이는 표지가 저장되지 않았어요.",1e4);return}}g().doToastifyAlert(e?"★구버전 미디어 변경 완료":"★뉴버전 미디어 변경 완료",5e3),window.history.pushState(null,"",window.location.href),window.dispatchEvent(new Event("popstate"));}catch(o){const a=o instanceof Error?o.message:String(o);g().doToastifyAlert(`미디어 형식 변경에 실패했어요.
 ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleListing().popup().manager();!t||t.hasModified("neocopy")||(t.addButton("★ 세이프티로 복사",()=>xt(n,false),"neocopy"),t.addButton("★ 언세이프티로 복사",()=>xt(n,true),"neocopy"),t.addButton("★구버전 미디어",()=>convertMediaVersion(n,"v1"),"neocopy"),t.addButton("★뉴버전 미디어",()=>convertMediaVersion(n,"v2"),"neocopy"));}He.version="v3.0",He.description="크랙 스토리를 비공개 복사하고 미디어 버전을 변경합니다.";H.init(()=>{H.onPagePrepare(()=>{H.callGMAddStyle(qe),vt(),Nt.attachObserver(document,vt);});});
 
+})();
+
+// 몰름보 카피 4.0 - 작품별 수정/삭제 잠금 기능
+(function () {
+    'use strict';
+
+    const LOCK_STORAGE_PREFIX = 'mollumbo-copy:story-lock:v1:';
+    const LOCK_MENU_ATTRIBUTE = 'data-mollumbo-lock-menu';
+    const deleteGuards = new WeakMap();
+    let menuCheckScheduled = false;
+
+    function normalizeLabel(value) {
+        return String(value ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    function lockStorageKey(storyId) {
+        return `${LOCK_STORAGE_PREFIX}${storyId}`;
+    }
+
+    function isStoryLocked(storyId) {
+        try {
+            return localStorage.getItem(lockStorageKey(storyId)) === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    function saveStoryLock(storyId, locked) {
+        try {
+            if (locked) {
+                localStorage.setItem(lockStorageKey(storyId), '1');
+            } else {
+                localStorage.removeItem(lockStorageKey(storyId));
+            }
+            return true;
+        } catch {
+            return false;
+        }
+    }
+
+    function isVisible(element) {
+        if (!(element instanceof Element)) return false;
+        const rect = element.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+    }
+
+    function findMenuContainer() {
+        const openMenu = Array.from(document.querySelectorAll(
+            '[role="menu"][data-state="open"], div[data-radix-popper-content-wrapper] [role="menu"]'
+        )).find(isVisible);
+        if (openMenu) return openMenu;
+
+        const actionLabels = new Set([
+            '수정', '수정하기', '삭제', '삭제하기',
+            '공개로 변경', '비공개로 변경', '링크 공개로 변경', '링크공개로 변경'
+        ]);
+        const visibleActions = Array.from(document.querySelectorAll(
+            'button, [role="menuitem"], [role="button"], div, p, span'
+        )).filter((element) => actionLabels.has(normalizeLabel(element.textContent)) && isVisible(element));
+        const editAction = visibleActions.find((element) => ['수정', '수정하기'].includes(normalizeLabel(element.textContent)));
+        const deleteAction = visibleActions.find((element) => ['삭제', '삭제하기'].includes(normalizeLabel(element.textContent)));
+        if (!editAction || !deleteAction) return null;
+
+        for (let element = editAction, depth = 0; element && element !== document.body && depth < 10; element = element.parentElement, depth += 1) {
+            if (element.contains(deleteAction) && isVisible(element) && element.children.length >= 2) return element;
+        }
+        return null;
+    }
+
+    function findMenuItem(container, labels) {
+        if (!container) return null;
+        const normalizedLabels = new Set(labels.map(normalizeLabel));
+        const directChild = Array.from(container.children ?? []).find(
+            (element) => normalizedLabels.has(normalizeLabel(element.textContent))
+        );
+        if (directChild) return directChild;
+
+        const nested = Array.from(container.querySelectorAll(
+            'button, [role="menuitem"], [role="button"], div, p, span'
+        )).find((element) => normalizedLabels.has(normalizeLabel(element.textContent)));
+        return nested?.closest?.('button, [role="menuitem"], [role="button"]') ?? nested ?? null;
+    }
+
+    function findStoryInfo(container) {
+        if (!container) return null;
+        const seen = new Set();
+        let visits = 0;
+
+        function scan(value, depth = 0) {
+            if (!value || typeof value !== 'object' || depth > 12 || seen.has(value) || visits++ > 6000) return null;
+            seen.add(value);
+            if (typeof value.sourceId === 'string' && value.sourceId.length > 0) {
+                return {
+                    type: typeof value.type === 'string' ? value.type : 'story',
+                    id: value.sourceId
+                };
+            }
+
+            const preferredKeys = ['content', 'props', 'children', 'memoizedProps', 'pendingProps', 'return', 'child', 'sibling'];
+            for (const key of preferredKeys) {
+                if (!(key in value)) continue;
+                const result = scan(value[key], depth + 1);
+                if (result) return result;
+            }
+            if (depth < 5) {
+                for (const child of Object.values(value)) {
+                    const result = scan(child, depth + 1);
+                    if (result) return result;
+                }
+            }
+            return null;
+        }
+
+        const candidates = [];
+        for (let element = container, depth = 0; element && depth < 7; element = element.parentElement, depth += 1) {
+            candidates.push(element);
+        }
+        for (const element of Array.from(container.querySelectorAll?.('*') ?? []).slice(0, 40)) {
+            candidates.push(element);
+        }
+        const expandedButton = document.querySelector('[aria-expanded="true"]');
+        if (expandedButton) {
+            for (let element = expandedButton, depth = 0; element && depth < 8; element = element.parentElement, depth += 1) {
+                candidates.push(element);
+            }
+        }
+
+        for (const element of candidates) {
+            for (const key of Object.keys(element).filter((name) => name.startsWith('__reactProps') || name.startsWith('__reactFiber'))) {
+                const result = scan(element[key]);
+                if (result) return result;
+            }
+        }
+        return null;
+    }
+
+    function showLockedDeleteAlert() {
+        alert('이 작품은 잠겨있어서 삭제가 불가능합니다.');
+    }
+
+    function setDeleteLocked(menu, locked) {
+        const deleteItem = findMenuItem(menu, ['삭제', '삭제하기']);
+        if (!deleteItem) return;
+
+        const previous = deleteGuards.get(deleteItem);
+        if (previous) {
+            deleteItem.removeEventListener('click', previous.click, true);
+            deleteItem.removeEventListener('keydown', previous.keydown, true);
+            deleteGuards.delete(deleteItem);
+        }
+
+        deleteItem.removeAttribute('aria-disabled');
+        deleteItem.style.removeProperty('opacity');
+        deleteItem.style.removeProperty('cursor');
+        deleteItem.style.removeProperty('filter');
+        if (!locked) return;
+
+        deleteItem.setAttribute('aria-disabled', 'true');
+        deleteItem.style.setProperty('opacity', '0.38', 'important');
+        deleteItem.style.setProperty('cursor', 'not-allowed', 'important');
+        deleteItem.style.setProperty('filter', 'grayscale(1)', 'important');
+
+        const blockClick = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            showLockedDeleteAlert();
+        };
+        const blockKeydown = (event) => {
+            if (event.key === 'Enter' || event.key === ' ') blockClick(event);
+        };
+        deleteItem.addEventListener('click', blockClick, true);
+        deleteItem.addEventListener('keydown', blockKeydown, true);
+        deleteGuards.set(deleteItem, { click: blockClick, keydown: blockKeydown });
+    }
+
+    function updateLockMenu(menu, storyId, lockItem) {
+        const locked = isStoryLocked(storyId);
+        lockItem.textContent = locked ? '🔒 잠금해제' : '🔓 잠금';
+        setDeleteLocked(menu, locked);
+    }
+
+    function decorateOpenMenu() {
+        if (!/^\/my(\/.*)?$/.test(location.pathname)) return;
+        const menu = findMenuContainer();
+        if (!menu) return;
+
+        const existingLockItem = menu.querySelector(`[${LOCK_MENU_ATTRIBUTE}]`);
+        if (existingLockItem) {
+            const storyId = existingLockItem.getAttribute('data-mollumbo-story-id');
+            if (storyId) updateLockMenu(menu, storyId, existingLockItem);
+            return;
+        }
+
+        const newMediaItem = findMenuItem(menu, ['★뉴버전 미디어', '★ 뉴버전 미디어']);
+        if (!newMediaItem) return;
+        const storyInfo = findStoryInfo(menu);
+        if (!storyInfo || (storyInfo.type && storyInfo.type !== 'story')) return;
+
+        const lockItem = newMediaItem.cloneNode(true);
+        lockItem.removeAttribute('id');
+        lockItem.removeAttribute('aria-describedby');
+        lockItem.setAttribute(LOCK_MENU_ATTRIBUTE, 'true');
+        lockItem.setAttribute('data-mollumbo-story-id', storyInfo.id);
+        lockItem.addEventListener('click', (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            event.stopImmediatePropagation();
+            const nextLocked = !isStoryLocked(storyInfo.id);
+            if (!saveStoryLock(storyInfo.id, nextLocked)) {
+                alert('잠금 상태를 저장하지 못했습니다.');
+                return;
+            }
+            updateLockMenu(menu, storyInfo.id, lockItem);
+        });
+        newMediaItem.after(lockItem);
+        updateLockMenu(menu, storyInfo.id, lockItem);
+    }
+
+    function scheduleMenuCheck() {
+        if (menuCheckScheduled) return;
+        menuCheckScheduled = true;
+        setTimeout(() => {
+            menuCheckScheduled = false;
+            decorateOpenMenu();
+            setTimeout(decorateOpenMenu, 100);
+        }, 0);
+    }
+
+    function lockedBuilderStoryId() {
+        if (!/^\/builder\/story(\/.*)?$/.test(location.pathname)) return null;
+        const params = new URLSearchParams(location.search);
+        if (params.get('type') !== 'edit') return null;
+        const storyId = params.get('storyId');
+        return storyId && isStoryLocked(storyId) ? storyId : null;
+    }
+
+    function blockLockedBuilderModify(event) {
+        if (!lockedBuilderStoryId()) return;
+        const control = event.target instanceof Element
+            ? event.target.closest('button, [role="button"]')
+            : null;
+        if (normalizeLabel(control?.textContent) !== '수정') return;
+
+        event.preventDefault();
+        event.stopPropagation();
+        event.stopImmediatePropagation();
+        alert('이 작품은 잠겨있어서 수정이 불가능합니다.');
+    }
+
+    function startLockFeature() {
+        document.addEventListener('click', blockLockedBuilderModify, true);
+        document.addEventListener('click', scheduleMenuCheck);
+        window.addEventListener('popstate', scheduleMenuCheck);
+        scheduleMenuCheck();
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startLockFeature, { once: true });
+    } else {
+        startLockFeature();
+    }
 })();
