@@ -585,11 +585,46 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
     }
 
     function findNativeModifyButton(frameDocument) {
-        return Array.from(frameDocument?.querySelectorAll?.('button') ?? []).find((button) => {
-            if (normalizePromptLabel(button.textContent) !== '수정') return false;
+        const candidates = Array.from(frameDocument?.querySelectorAll?.('button') ?? []).filter((button) => (
+            normalizePromptLabel(button.textContent) === '수정' && !button.disabled
+        ));
+        const visible = candidates.find((button) => {
             const rect = button.getBoundingClientRect();
-            return rect.width > 0 && rect.height > 0 && !button.disabled;
-        }) ?? null;
+            return rect.width > 0 && rect.height > 0;
+        });
+        return visible ?? candidates[0] ?? null;
+    }
+
+    async function acquireNativeModifyButton(iframe) {
+        const immediate = findNativeModifyButton(iframe.contentDocument);
+        if (immediate) return { button: immediate, restore() {} };
+
+        const originalStyle = {
+            width: iframe.style.width,
+            minWidth: iframe.style.minWidth,
+            maxWidth: iframe.style.maxWidth,
+            flex: iframe.style.flex
+        };
+        const restore = () => {
+            iframe.style.width = originalStyle.width;
+            iframe.style.minWidth = originalStyle.minWidth;
+            iframe.style.maxWidth = originalStyle.maxWidth;
+            iframe.style.flex = originalStyle.flex;
+        };
+
+        iframe.style.width = '1280px';
+        iframe.style.minWidth = '1280px';
+        iframe.style.maxWidth = 'none';
+        iframe.style.flex = '0 0 1280px';
+
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const button = findNativeModifyButton(iframe.contentDocument);
+            if (button) return { button, restore };
+        }
+
+        restore();
+        return null;
     }
 
     function watchStorySaveRequest(iframe, storyId) {
@@ -908,24 +943,34 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                     closePromptEditor();
                     return;
                 }
-                const nativeModifyButton = findNativeModifyButton(iframe.contentDocument);
-                if (!nativeModifyButton) {
-                    alert('수정 화면이 아직 준비되지 않았습니다. 잠시 후 다시 눌러 주세요.');
-                    return;
-                }
-                const previousVersionKey = await myStoryVersionKey(storyId);
-                if (!previousVersionKey) {
-                    alert('저장 전 작품 버전을 확인하지 못했습니다. 잠시 후 다시 눌러 주세요.');
-                    return;
-                }
                 saveButton.disabled = true;
                 saveButton.textContent = '저장 중...';
                 saveButton.style.opacity = '0.65';
+                const nativeModifyControl = await acquireNativeModifyButton(iframe);
+                if (!nativeModifyControl) {
+                    saveButton.disabled = false;
+                    saveButton.textContent = '수정';
+                    saveButton.style.opacity = '1';
+                    alert('수정 화면이 아직 준비되지 않았습니다. 잠시 후 다시 눌러 주세요.');
+                    return;
+                }
+                const nativeModifyButton = nativeModifyControl.button;
+                const previousVersionKey = await myStoryVersionKey(storyId);
+                if (!previousVersionKey) {
+                    nativeModifyControl.restore();
+                    saveButton.disabled = false;
+                    saveButton.textContent = '수정';
+                    saveButton.style.opacity = '1';
+                    alert('저장 전 작품 버전을 확인하지 못했습니다. 잠시 후 다시 눌러 주세요.');
+                    return;
+                }
                 const previousRequestCount = storySaveRequestCount(iframe, storyId);
                 const saveWatcher = watchStorySaveRequest(iframe, storyId);
                 let saved = false;
                 try {
                     nativeModifyButton.click();
+                    await new Promise((resolve) => setTimeout(resolve, 100));
+                    nativeModifyControl.restore();
                     saved = saveWatcher
                         ? await Promise.race([
                             saveWatcher.promise,
@@ -933,6 +978,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                         ])
                         : await waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount);
                 } finally {
+                    nativeModifyControl.restore();
                     saveWatcher?.restore();
                 }
                 if (!saved) {
