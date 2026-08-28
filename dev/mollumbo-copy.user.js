@@ -479,6 +479,8 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
     const PROMPT_BUTTON_ID = 'mollumbo-prompt-editor-button';
     const PROMPT_MODAL_ID = 'mollumbo-prompt-editor-modal';
     const UPGRADE_MODAL_ID = 'mollumbo-version-upgrade-modal';
+    const INLINE_SAVE_BUTTON_ID = 'mollumbo-prompt-editor-inline-save';
+    const INLINE_CLOSE_BUTTON_ID = 'mollumbo-prompt-editor-inline-close';
     const LOCK_STORAGE_PREFIX = 'mollumbo-copy:story-lock:v1:';
     const ownershipCache = new Map();
     let promptCheckScheduled = false;
@@ -565,7 +567,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             await new Promise((resolve) => setTimeout(resolve, 500));
             if (storySaveRequestCount(iframe, storyId) > previousRequestCount) return true;
             const currentVersionKey = await myStoryVersionKey(storyId);
-            if (currentVersionKey && currentVersionKey !== previousVersionKey) return true;
+            if (previousVersionKey && currentVersionKey && currentVersionKey !== previousVersionKey) return true;
         }
         return false;
     }
@@ -586,13 +588,40 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
     function findNativeModifyButton(frameDocument) {
         const candidates = Array.from(frameDocument?.querySelectorAll?.('button') ?? []).filter((button) => (
-            normalizePromptLabel(button.textContent) === '수정' && !button.disabled
+            normalizePromptLabel(button.textContent) === '수정'
+            && button.id !== INLINE_SAVE_BUTTON_ID
+            && !button.disabled
         ));
         const visible = candidates.find((button) => {
             const rect = button.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0;
         });
         return visible ?? candidates[0] ?? null;
+    }
+
+    function findVisibleNativeModifyButton(iframe) {
+        try {
+            const frameWindow = iframe.contentWindow;
+            const viewportWidth = Number(frameWindow?.innerWidth) || Infinity;
+            const viewportHeight = Number(frameWindow?.innerHeight) || Infinity;
+            return Array.from(iframe.contentDocument?.querySelectorAll?.('button') ?? []).find((button) => {
+                if (
+                    normalizePromptLabel(button.textContent) !== '수정'
+                    || button.id === INLINE_SAVE_BUTTON_ID
+                    || button.disabled
+                ) return false;
+                const rect = button.getBoundingClientRect();
+                const left = Number(rect.left ?? rect.x ?? 0);
+                const top = Number(rect.top ?? rect.y ?? 0);
+                const right = Number(rect.right ?? (left + rect.width));
+                const bottom = Number(rect.bottom ?? (top + rect.height));
+                return rect.width > 0 && rect.height > 0
+                    && right > 0 && bottom > 0
+                    && left < viewportWidth && top < viewportHeight;
+            }) ?? null;
+        } catch {
+            return null;
+        }
     }
 
     async function acquireNativeModifyButton(iframe) {
@@ -876,63 +905,190 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             'box-shadow:0 24px 70px rgba(0,0,0,.38)'
         ].join(';');
 
-        const header = document.createElement('header');
-        header.style.cssText = [
-            'display:flex',
-            'align-items:center',
-            'gap:10px',
-            'min-height:56px',
-            'padding:0 16px',
-            'border-bottom:1px solid rgba(127,127,127,.28)',
-            'background:#fff',
-            'color:#171717'
-        ].join(';');
-
-        const title = document.createElement('strong');
-        title.textContent = '★프롬프트 수정';
-        title.style.cssText = 'font-size:16px;flex:1';
-
-        const saveButton = document.createElement('button');
-        saveButton.type = 'button';
-        saveButton.textContent = '수정';
-        saveButton.style.cssText = [
-            'height:38px',
-            'padding:0 18px',
-            'border:0',
-            'border-radius:8px',
-            'background:#171717',
-            'color:#fff',
-            'font-size:14px',
-            'font-weight:700',
-            'cursor:pointer'
-        ].join(';');
-
-        const closeButton = document.createElement('button');
-        closeButton.type = 'button';
-        closeButton.setAttribute('aria-label', '닫기');
-        closeButton.textContent = '닫기';
-        closeButton.style.cssText = [
-            'height:38px',
-            'padding:0 14px',
-            'border:1px solid rgba(127,127,127,.35)',
-            'border-radius:8px',
-            'background:#fff',
-            'color:#171717',
-            'font-size:14px',
-            'font-weight:600',
-            'cursor:pointer'
-        ].join(';');
+        const saveTrigger = document.createElement('button');
+        saveTrigger.type = 'button';
+        saveTrigger.textContent = '수정';
 
         const iframe = document.createElement('iframe');
         iframe.title = '스토리 설정 편집 화면';
         iframe.src = `/builder/story?storyId=${encodeURIComponent(storyId)}&type=edit`;
         iframe.style.cssText = 'width:100%;height:100%;border:0;background:#fff';
+
+        let controlObserver = null;
+        let observedFrameWindow = null;
+        let controlSyncScheduled = false;
+
+        const stopControlSync = () => {
+            controlObserver?.disconnect();
+            controlObserver = null;
+            if (observedFrameWindow) observedFrameWindow.removeEventListener('resize', scheduleControlSync);
+            observedFrameWindow = null;
+        };
+
+        const closeEditor = () => {
+            stopControlSync();
+            closePromptEditor();
+        };
+
+        const setSavingState = (saving) => {
+            saveTrigger.disabled = saving;
+            saveTrigger.textContent = saving ? '저장 중...' : '수정';
+            try {
+                const inlineSave = iframe.contentDocument?.getElementById(INLINE_SAVE_BUTTON_ID);
+                if (inlineSave) {
+                    inlineSave.disabled = saving;
+                    if (inlineSave.textContent !== saveTrigger.textContent) {
+                        inlineSave.textContent = saveTrigger.textContent;
+                    }
+                    inlineSave.style.opacity = saving ? '0.65' : '1';
+                }
+            } catch {
+                // 편집 화면을 닫는 중이면 버튼 상태를 갱신하지 않습니다.
+            }
+        };
+
+        const createInlineButton = (frameDocument, template, id, label, primary) => {
+            const button = template?.cloneNode?.(true) ?? frameDocument.createElement('button');
+            button.id = id;
+            button.type = 'button';
+            button.disabled = false;
+            button.textContent = label;
+            button.removeAttribute('aria-describedby');
+            for (const element of button.querySelectorAll?.('[id]') ?? []) element.removeAttribute('id');
+            button.style.cssText = [
+                'display:inline-flex',
+                'align-items:center',
+                'justify-content:center',
+                'flex:0 0 auto',
+                'min-width:48px',
+                'height:40px',
+                'padding:0 10px',
+                `border:${primary ? '0' : '1px solid rgba(127,127,127,.35)'}`,
+                'border-radius:8px',
+                `background:${primary ? '#171717' : '#fff'}`,
+                `color:${primary ? '#fff' : '#171717'}`,
+                'font-size:14px',
+                'font-weight:700',
+                'white-space:nowrap',
+                'cursor:pointer'
+            ].join(';');
+            return button;
+        };
+
+        const findActionHost = (frameDocument, originalModifyButton) => {
+            const temporarySave = Array.from(frameDocument.querySelectorAll('button')).find(
+                (button) => normalizePromptLabel(button.textContent) === '임시저장'
+            );
+            const anchor = originalModifyButton ?? temporarySave;
+            if (!anchor) return null;
+            let host = anchor.parentElement;
+            for (let depth = 0; host && depth < 3; depth += 1) {
+                if (host.querySelectorAll('button').length >= 2) return host;
+                host = host.parentElement;
+            }
+            return anchor.parentElement;
+        };
+
+        const syncInlineControls = () => {
+            try {
+                const frameDocument = iframe.contentDocument;
+                if (!frameDocument?.body) return;
+                const originalModifyButtons = Array.from(frameDocument.querySelectorAll('button')).filter(
+                    (button) => normalizePromptLabel(button.textContent) === '수정'
+                        && button.id !== INLINE_SAVE_BUTTON_ID
+                );
+                const visibleOriginal = findVisibleNativeModifyButton(iframe);
+                const originalModify = visibleOriginal ?? originalModifyButtons[0] ?? null;
+                const temporarySave = Array.from(frameDocument.querySelectorAll('button')).find(
+                    (button) => normalizePromptLabel(button.textContent) === '임시저장'
+                );
+                const host = findActionHost(frameDocument, originalModify);
+                if (!host) return;
+
+                for (const button of originalModifyButtons) {
+                    if (button.style.display !== 'none') button.style.display = 'none';
+                }
+
+                let inlineSave = frameDocument.getElementById(INLINE_SAVE_BUTTON_ID);
+                if (!inlineSave) {
+                    inlineSave = createInlineButton(
+                        frameDocument,
+                        visibleOriginal ?? temporarySave,
+                        INLINE_SAVE_BUTTON_ID,
+                        '수정',
+                        true
+                    );
+                    inlineSave.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        saveTrigger.click();
+                    });
+                }
+
+                let inlineClose = frameDocument.getElementById(INLINE_CLOSE_BUTTON_ID);
+                if (!inlineClose) {
+                    inlineClose = createInlineButton(
+                        frameDocument,
+                        visibleOriginal ?? temporarySave,
+                        INLINE_CLOSE_BUTTON_ID,
+                        '닫기',
+                        false
+                    );
+                    inlineClose.setAttribute('aria-label', '닫기');
+                    inlineClose.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        closeEditor();
+                    });
+                }
+
+                if (inlineSave.parentElement !== host || inlineClose.parentElement !== host) {
+                    host.append(inlineSave, inlineClose);
+                }
+                setSavingState(saveTrigger.disabled);
+            } catch {
+                // 편집 화면이 그려지는 중이면 다음 화면 변화 때 다시 시도합니다.
+            }
+        };
+
+        function scheduleControlSync() {
+            if (controlSyncScheduled) return;
+            controlSyncScheduled = true;
+            setTimeout(() => {
+                controlSyncScheduled = false;
+                if (document.getElementById(PROMPT_MODAL_ID)) syncInlineControls();
+            }, 0);
+        }
+
+        const startControlSync = () => {
+            stopControlSync();
+            scheduleControlSync();
+            try {
+                const frameDocument = iframe.contentDocument;
+                const frameWindow = iframe.contentWindow;
+                const Observer = frameWindow?.MutationObserver;
+                if (frameDocument?.documentElement && typeof Observer === 'function') {
+                    controlObserver = new Observer(scheduleControlSync);
+                    controlObserver.observe(frameDocument.documentElement, { childList: true, subtree: true });
+                }
+                if (frameWindow) {
+                    observedFrameWindow = frameWindow;
+                    frameWindow.addEventListener('resize', scheduleControlSync);
+                }
+            } catch {
+                // 같은 크랙 주소의 편집 화면이 준비되면 재시도합니다.
+            }
+            setTimeout(scheduleControlSync, 300);
+            setTimeout(scheduleControlSync, 1000);
+        };
+
         iframe.addEventListener('load', () => {
+            startControlSync();
             setTimeout(() => focusStorySettings(iframe), 300);
             setTimeout(() => focusStorySettings(iframe), 1000);
         });
 
-        saveButton.addEventListener('click', async () => {
+        saveTrigger.addEventListener('click', async () => {
             if (isStoryLocked(storyId)) {
                 alert('이 작품은 잠겨있어서 수정이 불가능합니다.');
                 return;
@@ -940,17 +1096,13 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             try {
                 const currentChat = chatInfoFromPath();
                 if (!currentChat || currentChat.storyId !== storyId) {
-                    closePromptEditor();
+                    closeEditor();
                     return;
                 }
-                saveButton.disabled = true;
-                saveButton.textContent = '저장 중...';
-                saveButton.style.opacity = '0.65';
+                setSavingState(true);
                 const nativeModifyControl = await acquireNativeModifyButton(iframe);
                 if (!nativeModifyControl) {
-                    saveButton.disabled = false;
-                    saveButton.textContent = '수정';
-                    saveButton.style.opacity = '1';
+                    setSavingState(false);
                     alert('수정 화면이 아직 준비되지 않았습니다. 잠시 후 다시 눌러 주세요.');
                     return;
                 }
@@ -958,9 +1110,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                 const previousVersionKey = await myStoryVersionKey(storyId);
                 if (!previousVersionKey) {
                     nativeModifyControl.restore();
-                    saveButton.disabled = false;
-                    saveButton.textContent = '수정';
-                    saveButton.style.opacity = '1';
+                    setSavingState(false);
                     alert('저장 전 작품 버전을 확인하지 못했습니다. 잠시 후 다시 눌러 주세요.');
                     return;
                 }
@@ -982,28 +1132,22 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                     saveWatcher?.restore();
                 }
                 if (!saved) {
-                    saveButton.disabled = false;
-                    saveButton.textContent = '수정';
-                    saveButton.style.opacity = '1';
+                    setSavingState(false);
                     alert('저장 완료를 확인하지 못했습니다. 팝업 안의 오류를 확인해 주세요.');
                     return;
                 }
-                closePromptEditor();
+                closeEditor();
                 openVersionUpgradeDialog(storyId, currentChat.chatId);
             } catch {
-                saveButton.disabled = false;
-                saveButton.textContent = '수정';
-                saveButton.style.opacity = '1';
-                alert('수정 버튼을 실행하지 못했습니다. 팝업 안의 수정 버튼을 눌러 주세요.');
+                setSavingState(false);
+                alert('수정 버튼을 실행하지 못했습니다. 잠시 후 다시 눌러 주세요.');
             }
         });
-        closeButton.addEventListener('click', closePromptEditor);
         overlay.addEventListener('click', (event) => {
-            if (event.target === overlay) closePromptEditor();
+            if (event.target === overlay) closeEditor();
         });
 
-        header.append(title, saveButton, closeButton);
-        panel.append(header, iframe);
+        panel.append(iframe);
         overlay.append(panel);
         document.body.append(overlay);
     }
