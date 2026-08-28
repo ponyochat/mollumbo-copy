@@ -1,9 +1,9 @@
 // ==UserScript==
-// @name         몰름보 카피 5.0 DEV
+// @name         몰름보 카피 5.1 DEV
 // @namespace    https://github.com/milkyway0308
-// @version      5.0
+// @version      5.1
 // @author       milkyway0308
-// @description  몰름보 카피 5.0 개발판입니다. 채팅 중 내 작품의 프롬프트를 팝업에서 바로 수정할 수 있습니다.
+// @description  몰름보 카피 5.1 개발판입니다. 채팅 중 내 작품의 프롬프트를 팝업에서 바로 수정할 수 있습니다.
 // @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/dev/mollumbo-copy.user.js
 // @downloadURL  https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/dev/mollumbo-copy.user.js
 // @match        https://crack.wrtn.ai/*
@@ -61,7 +61,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
 })();
 
-// 몰름보 카피 5.0 DEV - 작품별 수정/삭제 잠금 기능
+// 몰름보 카피 5.1 DEV - 작품별 수정/삭제 잠금 기능
 (function () {
     'use strict';
 
@@ -470,7 +470,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
     }
 })();
 
-// 몰름보 카피 5.0 DEV - 채팅방 프롬프트 수정 팝업
+// 몰름보 카피 5.1 DEV - 채팅방 프롬프트 수정 팝업
 (function () {
     'use strict';
 
