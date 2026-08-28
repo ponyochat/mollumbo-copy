@@ -865,6 +865,18 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         button.removeAttribute('aria-describedby');
         for (const element of button.querySelectorAll('[id]')) element.removeAttribute('id');
 
+        const icon = button.querySelector('svg');
+        if (icon) {
+            icon.setAttribute('viewBox', '0 0 24 24');
+            icon.setAttribute('fill', 'none');
+            icon.setAttribute('stroke', 'currentColor');
+            icon.setAttribute('stroke-width', '1.8');
+            icon.setAttribute('stroke-linecap', 'round');
+            icon.setAttribute('stroke-linejoin', 'round');
+            icon.setAttribute('data-mollumbo-icon', 'pencil');
+            icon.innerHTML = '<path d="M4 20h4L19 9l-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path><path d="M3 21h18"></path>';
+        }
+
         const label = Array.from(button.querySelectorAll('*')).find((element) => {
             if (normalizePromptLabel(element.textContent) !== '플레이 가이드') return false;
             return !Array.from(element.children).some(
