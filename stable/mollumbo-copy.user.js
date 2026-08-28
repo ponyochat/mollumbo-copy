@@ -1,9 +1,9 @@
 // ==UserScript==
 // @name         몰름보 카피
 // @namespace    https://github.com/milkyway0308
-// @version      4.1
+// @version      5.1
 // @author       milkyway0308
-// @description  크랙 스토리를 비공개 복사하고 미디어 버전을 변경하며, 작품별 수정·삭제 잠금을 지원합니다.
+// @description  크랙 스토리 복사, 미디어 변경, 작품 잠금, 채팅 중 프롬프트 수정을 지원합니다.
 // @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
 // @downloadURL  https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
 // @match        https://crack.wrtn.ai/*
@@ -61,7 +61,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
 })();
 
-// 몰름보 카피 4.1 - 작품별 수정/삭제 잠금 기능
+// 몰름보 카피 5.1 - 작품별 수정/삭제 잠금 기능
 (function () {
     'use strict';
 
@@ -467,5 +467,781 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         document.addEventListener('DOMContentLoaded', startLockFeature, { once: true });
     } else {
         startLockFeature();
+    }
+})();
+
+// 몰름보 카피 5.1 - 채팅방 프롬프트 수정 팝업
+(function () {
+    'use strict';
+
+    if (window.top !== window.self) return;
+
+    const PROMPT_BUTTON_ID = 'mollumbo-prompt-editor-button';
+    const PROMPT_MODAL_ID = 'mollumbo-prompt-editor-modal';
+    const UPGRADE_MODAL_ID = 'mollumbo-version-upgrade-modal';
+    const INLINE_SAVE_BUTTON_ID = 'mollumbo-prompt-editor-inline-save';
+    const INLINE_CLOSE_BUTTON_ID = 'mollumbo-prompt-editor-inline-close';
+    const LOCK_STORAGE_PREFIX = 'mollumbo-copy:story-lock:v1:';
+    const ownershipCache = new Map();
+    let promptCheckScheduled = false;
+
+    function normalizePromptLabel(value) {
+        return String(value ?? '').replace(/\s+/g, ' ').trim();
+    }
+
+    function chatInfoFromPath() {
+        const modern = location.pathname.match(/^\/stories\/([a-f0-9]+)\/episodes\/([a-f0-9]+)(?:\/|$)/i);
+        if (modern) return { storyId: modern[1], chatId: modern[2] };
+        const legacy = location.pathname.match(/^\/u\/([a-f0-9]+)\/c\/([a-f0-9]+)(?:\/|$)/i);
+        return legacy ? { storyId: legacy[1], chatId: legacy[2] } : null;
+    }
+
+    function storyIdFromChatPath() {
+        return chatInfoFromPath()?.storyId ?? null;
+    }
+
+    function accessToken() {
+        const match = document.cookie.match(/(?:^|; )access_token=([^;]*)/);
+        return match ? decodeURIComponent(match[1]) : null;
+    }
+
+    async function isMyStory(storyId) {
+        if (ownershipCache.has(storyId)) return ownershipCache.get(storyId);
+
+        const check = (async () => {
+            const token = accessToken();
+            if (!token) return false;
+            try {
+                const response = await fetch(`https://crack-api.wrtn.ai/crack-api/stories/me/${storyId}`, {
+                    method: 'GET',
+                    headers: { Authorization: `Bearer ${token}` }
+                });
+                return response.ok;
+            } catch {
+                return false;
+            }
+        })();
+        ownershipCache.set(storyId, check);
+        return check;
+    }
+
+    async function myStoryVersionKey(storyId) {
+        const token = accessToken();
+        if (!token) return null;
+        try {
+            const response = await fetch(
+                `https://crack-api.wrtn.ai/crack-api/stories/me/${storyId}?mollumbo_check=${Date.now()}`,
+                {
+                    method: 'GET',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Cache-Control': 'no-cache'
+                    }
+                }
+            );
+            if (!response.ok) return null;
+            const body = await response.json();
+            const story = body?.data ?? body;
+            return JSON.stringify([
+                story?.snapshotId ?? '',
+                story?.updatedAt ?? '',
+                story?.version ?? story?.latestVersion ?? ''
+            ]);
+        } catch {
+            return null;
+        }
+    }
+
+    function storySaveRequestCount(iframe, storyId) {
+        try {
+            return iframe.contentWindow.performance.getEntriesByType('resource').filter(
+                (entry) => String(entry.name).includes(`/crack-api/stories/${storyId}/v2`)
+            ).length;
+        } catch {
+            return 0;
+        }
+    }
+
+    async function waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount) {
+        for (let attempt = 0; attempt < 30; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            if (storySaveRequestCount(iframe, storyId) > previousRequestCount) return true;
+            const currentVersionKey = await myStoryVersionKey(storyId);
+            if (previousVersionKey && currentVersionKey && currentVersionKey !== previousVersionKey) return true;
+        }
+        return false;
+    }
+
+    function isStoryLocked(storyId) {
+        try {
+            return localStorage.getItem(`${LOCK_STORAGE_PREFIX}${storyId}`) === '1';
+        } catch {
+            return false;
+        }
+    }
+
+    function findChatSettingsHeading() {
+        return Array.from(document.querySelectorAll('span, p')).find(
+            (element) => normalizePromptLabel(element.textContent) === '채팅방 설정'
+        ) ?? null;
+    }
+
+    function findNativeModifyButton(frameDocument) {
+        const candidates = Array.from(frameDocument?.querySelectorAll?.('button') ?? []).filter((button) => (
+            normalizePromptLabel(button.textContent) === '수정'
+            && button.id !== INLINE_SAVE_BUTTON_ID
+            && !button.disabled
+        ));
+        const visible = candidates.find((button) => {
+            const rect = button.getBoundingClientRect();
+            return rect.width > 0 && rect.height > 0;
+        });
+        return visible ?? candidates[0] ?? null;
+    }
+
+    function findVisibleNativeModifyButton(iframe) {
+        try {
+            const frameWindow = iframe.contentWindow;
+            const viewportWidth = Number(frameWindow?.innerWidth) || Infinity;
+            const viewportHeight = Number(frameWindow?.innerHeight) || Infinity;
+            return Array.from(iframe.contentDocument?.querySelectorAll?.('button') ?? []).find((button) => {
+                if (
+                    normalizePromptLabel(button.textContent) !== '수정'
+                    || button.id === INLINE_SAVE_BUTTON_ID
+                    || button.disabled
+                ) return false;
+                const rect = button.getBoundingClientRect();
+                const left = Number(rect.left ?? rect.x ?? 0);
+                const top = Number(rect.top ?? rect.y ?? 0);
+                const right = Number(rect.right ?? (left + rect.width));
+                const bottom = Number(rect.bottom ?? (top + rect.height));
+                return rect.width > 0 && rect.height > 0
+                    && right > 0 && bottom > 0
+                    && left < viewportWidth && top < viewportHeight;
+            }) ?? null;
+        } catch {
+            return null;
+        }
+    }
+
+    async function acquireNativeModifyButton(iframe) {
+        const immediate = findNativeModifyButton(iframe.contentDocument);
+        if (immediate) return { button: immediate, restore() {} };
+
+        const originalStyle = {
+            width: iframe.style.width,
+            minWidth: iframe.style.minWidth,
+            maxWidth: iframe.style.maxWidth,
+            flex: iframe.style.flex
+        };
+        const restore = () => {
+            iframe.style.width = originalStyle.width;
+            iframe.style.minWidth = originalStyle.minWidth;
+            iframe.style.maxWidth = originalStyle.maxWidth;
+            iframe.style.flex = originalStyle.flex;
+        };
+
+        iframe.style.width = '1280px';
+        iframe.style.minWidth = '1280px';
+        iframe.style.maxWidth = 'none';
+        iframe.style.flex = '0 0 1280px';
+
+        for (let attempt = 0; attempt < 20; attempt += 1) {
+            await new Promise((resolve) => setTimeout(resolve, 50));
+            const button = findNativeModifyButton(iframe.contentDocument);
+            if (button) return { button, restore };
+        }
+
+        restore();
+        return null;
+    }
+
+    function watchStorySaveRequest(iframe, storyId) {
+        try {
+            const frameWindow = iframe.contentWindow;
+            const originalFetch = frameWindow?.fetch;
+            if (!frameWindow || typeof originalFetch !== 'function') return null;
+
+            let resolveSave;
+            let finished = false;
+            const promise = new Promise((resolve) => {
+                resolveSave = resolve;
+            });
+            const finish = (saved) => {
+                if (finished) return;
+                finished = true;
+                resolveSave(saved);
+            };
+            const wrappedFetch = async (...args) => {
+                const input = args[0];
+                const options = args[1];
+                const url = String(typeof input === 'string' ? input : input?.url ?? input ?? '');
+                const method = String(options?.method ?? input?.method ?? 'GET').toUpperCase();
+                try {
+                    const response = await originalFetch.apply(frameWindow, args);
+                    if (
+                        method === 'PATCH'
+                        && url.includes(`/crack-api/stories/${storyId}/v2`)
+                    ) {
+                        finish(response.ok);
+                    }
+                    return response;
+                } catch (error) {
+                    if (
+                        method === 'PATCH'
+                        && url.includes(`/crack-api/stories/${storyId}/v2`)
+                    ) {
+                        finish(false);
+                    }
+                    throw error;
+                }
+            };
+            frameWindow.fetch = wrappedFetch;
+
+            const xhrPrototype = frameWindow.XMLHttpRequest?.prototype;
+            const originalOpen = xhrPrototype?.open;
+            const originalSend = xhrPrototype?.send;
+            let wrappedOpen = null;
+            let wrappedSend = null;
+            if (typeof originalOpen === 'function' && typeof originalSend === 'function') {
+                wrappedOpen = function (method, url, ...rest) {
+                    this.__mollumboStorySaveRequest = (
+                        String(method).toUpperCase() === 'PATCH'
+                        && String(url).includes(`/crack-api/stories/${storyId}/v2`)
+                    );
+                    return originalOpen.call(this, method, url, ...rest);
+                };
+                wrappedSend = function (...args) {
+                    if (this.__mollumboStorySaveRequest) {
+                        this.addEventListener('loadend', () => {
+                            finish(this.status >= 200 && this.status < 300);
+                        }, { once: true });
+                    }
+                    return originalSend.apply(this, args);
+                };
+                xhrPrototype.open = wrappedOpen;
+                xhrPrototype.send = wrappedSend;
+            }
+
+            return {
+                promise,
+                restore() {
+                    if (frameWindow.fetch === wrappedFetch) frameWindow.fetch = originalFetch;
+                    if (xhrPrototype?.open === wrappedOpen) xhrPrototype.open = originalOpen;
+                    if (xhrPrototype?.send === wrappedSend) xhrPrototype.send = originalSend;
+                }
+            };
+        } catch {
+            return null;
+        }
+    }
+
+    function focusStorySettings(iframe) {
+        try {
+            const frameDocument = iframe.contentDocument;
+            const storySettings = Array.from(frameDocument?.querySelectorAll?.('button') ?? []).find(
+                (button) => normalizePromptLabel(button.textContent).startsWith('스토리 설정')
+            );
+            storySettings?.click();
+        } catch {
+            // 편집 화면이 아직 준비 중이면 사용자가 팝업 안에서 직접 탭을 누를 수 있습니다.
+        }
+    }
+
+    function closePromptEditor() {
+        document.getElementById(PROMPT_MODAL_ID)?.remove();
+    }
+
+    function closeVersionUpgradeDialog() {
+        document.getElementById(UPGRADE_MODAL_ID)?.remove();
+    }
+
+    function createDialogButton(label, primary = false) {
+        const button = document.createElement('button');
+        button.type = 'button';
+        button.textContent = label;
+        button.style.cssText = [
+            'min-width:88px',
+            'height:40px',
+            'padding:0 18px',
+            `border:${primary ? '0' : '1px solid rgba(127,127,127,.35)'}`,
+            'border-radius:8px',
+            `background:${primary ? '#171717' : '#fff'}`,
+            `color:${primary ? '#fff' : '#171717'}`,
+            'font-size:14px',
+            'font-weight:700',
+            'cursor:pointer'
+        ].join(';');
+        return button;
+    }
+
+    async function applyChatVersion(chatId) {
+        const token = accessToken();
+        if (!token) return { ok: false, message: '로그인 정보를 확인하지 못했습니다.' };
+        try {
+            const response = await fetch(
+                `https://crack-api.wrtn.ai/crack-gen/v3/chats/${chatId}/snapshot/apply`,
+                {
+                    method: 'POST',
+                    headers: {
+                        Authorization: `Bearer ${token}`,
+                        'Content-Type': 'application/json'
+                    }
+                }
+            );
+            if (response.ok) return { ok: true };
+            const body = await response.json().catch(() => null);
+            return {
+                ok: false,
+                message: body?.message ?? body?.data?.message ?? '버전 적용에 실패했습니다.'
+            };
+        } catch {
+            return { ok: false, message: '버전 적용에 실패했습니다.' };
+        }
+    }
+
+    function openVersionUpgradeDialog(storyId, chatId) {
+        closeVersionUpgradeDialog();
+
+        const overlay = document.createElement('div');
+        overlay.id = UPGRADE_MODAL_ID;
+        overlay.style.cssText = [
+            'position:fixed',
+            'inset:0',
+            'z-index:2147483640',
+            'display:flex',
+            'align-items:center',
+            'justify-content:center',
+            'padding:18px',
+            'background:rgba(0,0,0,.58)'
+        ].join(';');
+
+        const dialog = document.createElement('section');
+        dialog.setAttribute('role', 'dialog');
+        dialog.setAttribute('aria-modal', 'true');
+        dialog.setAttribute('aria-label', '현재 채팅방 버전 업데이트 확인');
+        dialog.style.cssText = [
+            'width:min(420px,calc(100vw - 36px))',
+            'padding:26px',
+            'border-radius:14px',
+            'background:#fff',
+            'color:#171717',
+            'box-shadow:0 24px 70px rgba(0,0,0,.38)'
+        ].join(';');
+
+        const message = document.createElement('strong');
+        message.textContent = '현재 채팅방을 버전 업데이트 하시겠습니까?';
+        message.style.cssText = 'display:block;font-size:18px;line-height:1.5;text-align:center';
+
+        const description = document.createElement('p');
+        description.textContent = '적용하면 현재 채팅방부터 수정한 프롬프트를 사용합니다.';
+        description.style.cssText = 'margin:10px 0 22px;color:#666;font-size:14px;line-height:1.5;text-align:center';
+
+        const actions = document.createElement('div');
+        actions.style.cssText = 'display:flex;justify-content:center;gap:10px';
+        const cancelButton = createDialogButton('취소');
+        const applyButton = createDialogButton('적용', true);
+
+        cancelButton.addEventListener('click', closeVersionUpgradeDialog);
+        applyButton.addEventListener('click', async () => {
+            if (chatInfoFromPath()?.chatId !== chatId || storyIdFromChatPath() !== storyId) {
+                closeVersionUpgradeDialog();
+                alert('채팅방이 바뀌어서 버전을 적용하지 않았습니다.');
+                return;
+            }
+            applyButton.disabled = true;
+            applyButton.textContent = '적용 중...';
+            applyButton.style.opacity = '0.65';
+            const result = await applyChatVersion(chatId);
+            if (!result.ok) {
+                applyButton.disabled = false;
+                applyButton.textContent = '적용';
+                applyButton.style.opacity = '1';
+                alert(result.message);
+                return;
+            }
+            closeVersionUpgradeDialog();
+            location.reload();
+        });
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) closeVersionUpgradeDialog();
+        });
+
+        actions.append(cancelButton, applyButton);
+        dialog.append(message, description, actions);
+        overlay.append(dialog);
+        document.body.append(overlay);
+    }
+
+    function openPromptEditor(storyId) {
+        if (document.getElementById(PROMPT_MODAL_ID)) return;
+
+        const overlay = document.createElement('div');
+        overlay.id = PROMPT_MODAL_ID;
+        overlay.style.cssText = [
+            'position:fixed',
+            'inset:0',
+            'z-index:2147483600',
+            'display:flex',
+            'align-items:center',
+            'justify-content:center',
+            'padding:18px',
+            'background:rgba(0,0,0,.58)'
+        ].join(';');
+
+        const panel = document.createElement('section');
+        panel.setAttribute('role', 'dialog');
+        panel.setAttribute('aria-modal', 'true');
+        panel.setAttribute('aria-label', '프롬프트 수정');
+        panel.style.cssText = [
+            'display:flex',
+            'flex-direction:column',
+            'width:min(1500px,96vw)',
+            'height:min(940px,94vh)',
+            'overflow:hidden',
+            'border:1px solid rgba(127,127,127,.35)',
+            'border-radius:14px',
+            'background:#fff',
+            'box-shadow:0 24px 70px rgba(0,0,0,.38)'
+        ].join(';');
+
+        const saveTrigger = document.createElement('button');
+        saveTrigger.type = 'button';
+        saveTrigger.textContent = '수정';
+
+        const iframe = document.createElement('iframe');
+        iframe.title = '스토리 설정 편집 화면';
+        iframe.src = `/builder/story?storyId=${encodeURIComponent(storyId)}&type=edit`;
+        iframe.style.cssText = 'width:100%;height:100%;border:0;background:#fff';
+
+        let controlObserver = null;
+        let observedFrameWindow = null;
+        let controlSyncScheduled = false;
+
+        const stopControlSync = () => {
+            controlObserver?.disconnect();
+            controlObserver = null;
+            if (observedFrameWindow) observedFrameWindow.removeEventListener('resize', scheduleControlSync);
+            observedFrameWindow = null;
+        };
+
+        const closeEditor = () => {
+            stopControlSync();
+            closePromptEditor();
+        };
+
+        const setSavingState = (saving) => {
+            saveTrigger.disabled = saving;
+            saveTrigger.textContent = saving ? '저장 중...' : '수정';
+            try {
+                const inlineSave = iframe.contentDocument?.getElementById(INLINE_SAVE_BUTTON_ID);
+                if (inlineSave) {
+                    inlineSave.disabled = saving;
+                    if (inlineSave.textContent !== saveTrigger.textContent) {
+                        inlineSave.textContent = saveTrigger.textContent;
+                    }
+                    inlineSave.style.opacity = saving ? '0.65' : '1';
+                }
+            } catch {
+                // 편집 화면을 닫는 중이면 버튼 상태를 갱신하지 않습니다.
+            }
+        };
+
+        const createInlineButton = (frameDocument, template, id, label, primary) => {
+            const button = template?.cloneNode?.(true) ?? frameDocument.createElement('button');
+            button.id = id;
+            button.type = 'button';
+            button.disabled = false;
+            button.textContent = label;
+            button.removeAttribute('aria-describedby');
+            for (const element of button.querySelectorAll?.('[id]') ?? []) element.removeAttribute('id');
+            button.style.cssText = [
+                'display:inline-flex',
+                'align-items:center',
+                'justify-content:center',
+                'flex:0 0 auto',
+                'min-width:48px',
+                'height:40px',
+                'padding:0 10px',
+                `border:${primary ? '0' : '1px solid rgba(127,127,127,.35)'}`,
+                'border-radius:8px',
+                `background:${primary ? '#171717' : '#fff'}`,
+                `color:${primary ? '#fff' : '#171717'}`,
+                'font-size:14px',
+                'font-weight:700',
+                'white-space:nowrap',
+                'cursor:pointer'
+            ].join(';');
+            return button;
+        };
+
+        const findActionHost = (frameDocument, originalModifyButton) => {
+            const temporarySave = Array.from(frameDocument.querySelectorAll('button')).find(
+                (button) => normalizePromptLabel(button.textContent) === '임시저장'
+            );
+            const anchor = originalModifyButton ?? temporarySave;
+            if (!anchor) return null;
+            let host = anchor.parentElement;
+            for (let depth = 0; host && depth < 3; depth += 1) {
+                if (host.querySelectorAll('button').length >= 2) return host;
+                host = host.parentElement;
+            }
+            return anchor.parentElement;
+        };
+
+        const syncInlineControls = () => {
+            try {
+                const frameDocument = iframe.contentDocument;
+                if (!frameDocument?.body) return;
+                const originalModifyButtons = Array.from(frameDocument.querySelectorAll('button')).filter(
+                    (button) => normalizePromptLabel(button.textContent) === '수정'
+                        && button.id !== INLINE_SAVE_BUTTON_ID
+                );
+                const visibleOriginal = findVisibleNativeModifyButton(iframe);
+                const originalModify = visibleOriginal ?? originalModifyButtons[0] ?? null;
+                const temporarySave = Array.from(frameDocument.querySelectorAll('button')).find(
+                    (button) => normalizePromptLabel(button.textContent) === '임시저장'
+                );
+                const host = findActionHost(frameDocument, originalModify);
+                if (!host) return;
+
+                for (const button of originalModifyButtons) {
+                    if (button.style.display !== 'none') button.style.display = 'none';
+                }
+
+                let inlineSave = frameDocument.getElementById(INLINE_SAVE_BUTTON_ID);
+                if (!inlineSave) {
+                    inlineSave = createInlineButton(
+                        frameDocument,
+                        visibleOriginal ?? temporarySave,
+                        INLINE_SAVE_BUTTON_ID,
+                        '수정',
+                        true
+                    );
+                    inlineSave.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        saveTrigger.click();
+                    });
+                }
+
+                let inlineClose = frameDocument.getElementById(INLINE_CLOSE_BUTTON_ID);
+                if (!inlineClose) {
+                    inlineClose = createInlineButton(
+                        frameDocument,
+                        visibleOriginal ?? temporarySave,
+                        INLINE_CLOSE_BUTTON_ID,
+                        '닫기',
+                        false
+                    );
+                    inlineClose.setAttribute('aria-label', '닫기');
+                    inlineClose.addEventListener('click', (event) => {
+                        event.preventDefault();
+                        event.stopPropagation();
+                        closeEditor();
+                    });
+                }
+
+                if (inlineSave.parentElement !== host || inlineClose.parentElement !== host) {
+                    host.append(inlineSave, inlineClose);
+                }
+                setSavingState(saveTrigger.disabled);
+            } catch {
+                // 편집 화면이 그려지는 중이면 다음 화면 변화 때 다시 시도합니다.
+            }
+        };
+
+        function scheduleControlSync() {
+            if (controlSyncScheduled) return;
+            controlSyncScheduled = true;
+            setTimeout(() => {
+                controlSyncScheduled = false;
+                if (document.getElementById(PROMPT_MODAL_ID)) syncInlineControls();
+            }, 0);
+        }
+
+        const startControlSync = () => {
+            stopControlSync();
+            scheduleControlSync();
+            try {
+                const frameDocument = iframe.contentDocument;
+                const frameWindow = iframe.contentWindow;
+                const Observer = frameWindow?.MutationObserver;
+                if (frameDocument?.documentElement && typeof Observer === 'function') {
+                    controlObserver = new Observer(scheduleControlSync);
+                    controlObserver.observe(frameDocument.documentElement, { childList: true, subtree: true });
+                }
+                if (frameWindow) {
+                    observedFrameWindow = frameWindow;
+                    frameWindow.addEventListener('resize', scheduleControlSync);
+                }
+            } catch {
+                // 같은 크랙 주소의 편집 화면이 준비되면 재시도합니다.
+            }
+            setTimeout(scheduleControlSync, 300);
+            setTimeout(scheduleControlSync, 1000);
+        };
+
+        iframe.addEventListener('load', () => {
+            startControlSync();
+            setTimeout(() => focusStorySettings(iframe), 300);
+            setTimeout(() => focusStorySettings(iframe), 1000);
+        });
+
+        saveTrigger.addEventListener('click', async () => {
+            if (isStoryLocked(storyId)) {
+                alert('이 작품은 잠겨있어서 수정이 불가능합니다.');
+                return;
+            }
+            try {
+                const currentChat = chatInfoFromPath();
+                if (!currentChat || currentChat.storyId !== storyId) {
+                    closeEditor();
+                    return;
+                }
+                setSavingState(true);
+                const nativeModifyControl = await acquireNativeModifyButton(iframe);
+                if (!nativeModifyControl) {
+                    setSavingState(false);
+                    alert('수정 화면이 아직 준비되지 않았습니다. 잠시 후 다시 눌러 주세요.');
+                    return;
+                }
+                const nativeModifyButton = nativeModifyControl.button;
+                const previousVersionKey = await myStoryVersionKey(storyId);
+                if (!previousVersionKey) {
+                    nativeModifyControl.restore();
+                    setSavingState(false);
+                    alert('저장 전 작품 버전을 확인하지 못했습니다. 잠시 후 다시 눌러 주세요.');
+                    return;
+                }
+                const previousRequestCount = storySaveRequestCount(iframe, storyId);
+                const saveWatcher = watchStorySaveRequest(iframe, storyId);
+                let saved = false;
+                try {
+                    nativeModifyButton.click();
+                    await new Promise((resolve) => setTimeout(resolve, 100));
+                    nativeModifyControl.restore();
+                    saved = saveWatcher
+                        ? await Promise.race([
+                            saveWatcher.promise,
+                            waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount)
+                        ])
+                        : await waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount);
+                } finally {
+                    nativeModifyControl.restore();
+                    saveWatcher?.restore();
+                }
+                if (!saved) {
+                    setSavingState(false);
+                    alert('저장 완료를 확인하지 못했습니다. 팝업 안의 오류를 확인해 주세요.');
+                    return;
+                }
+                closeEditor();
+                openVersionUpgradeDialog(storyId, currentChat.chatId);
+            } catch {
+                setSavingState(false);
+                alert('수정 버튼을 실행하지 못했습니다. 잠시 후 다시 눌러 주세요.');
+            }
+        });
+        overlay.addEventListener('click', (event) => {
+            if (event.target === overlay) closeEditor();
+        });
+
+        panel.append(iframe);
+        overlay.append(panel);
+        document.body.append(overlay);
+    }
+
+    function createPromptMenuButton(template, storyId) {
+        const button = template.cloneNode(true);
+        button.id = PROMPT_BUTTON_ID;
+        button.removeAttribute('aria-describedby');
+        for (const element of button.querySelectorAll('[id]')) element.removeAttribute('id');
+
+        const icon = button.querySelector('svg');
+        if (icon) {
+            icon.setAttribute('viewBox', '0 0 24 24');
+            icon.setAttribute('fill', 'none');
+            icon.setAttribute('stroke', 'currentColor');
+            icon.setAttribute('stroke-width', '1.8');
+            icon.setAttribute('stroke-linecap', 'round');
+            icon.setAttribute('stroke-linejoin', 'round');
+            icon.setAttribute('data-mollumbo-icon', 'pencil');
+            icon.innerHTML = '<path d="M4 20h4L19 9l-4-4L4 16v4Z"></path><path d="m13.5 6.5 4 4"></path><path d="M3 21h18"></path>';
+        }
+
+        const label = Array.from(button.querySelectorAll('*')).find((element) => {
+            if (normalizePromptLabel(element.textContent) !== '플레이 가이드') return false;
+            return !Array.from(element.children).some(
+                (child) => normalizePromptLabel(child.textContent) === '플레이 가이드'
+            );
+        });
+        if (label) label.textContent = '★프롬프트 수정';
+        else button.textContent = '★프롬프트 수정';
+
+        button.setAttribute('role', 'button');
+        button.setAttribute('tabindex', '0');
+        button.style.cursor = 'pointer';
+        const activate = (event) => {
+            event.preventDefault();
+            event.stopPropagation();
+            openPromptEditor(storyId);
+        };
+        button.addEventListener('click', activate);
+        button.addEventListener('keydown', (event) => {
+            if (event.key === 'Enter' || event.key === ' ') activate(event);
+        });
+        return button;
+    }
+
+    async function ensurePromptMenuButton() {
+        const storyId = storyIdFromChatPath();
+        const existing = document.getElementById(PROMPT_BUTTON_ID);
+        if (!storyId) {
+            existing?.remove();
+            closePromptEditor();
+            closeVersionUpgradeDialog();
+            return;
+        }
+        if (existing) return;
+
+        const heading = findChatSettingsHeading();
+        const container = heading?.parentElement;
+        if (!heading || !container) return;
+        const guideItem = Array.from(container.children).find(
+            (element) => normalizePromptLabel(element.textContent) === '플레이 가이드'
+        );
+        if (!guideItem) return;
+        if (!await isMyStory(storyId) || storyIdFromChatPath() !== storyId) return;
+
+        const promptButton = createPromptMenuButton(guideItem, storyId);
+        guideItem.before(promptButton);
+    }
+
+    function schedulePromptMenuCheck() {
+        if (promptCheckScheduled) return;
+        promptCheckScheduled = true;
+        setTimeout(() => {
+            promptCheckScheduled = false;
+            ensurePromptMenuButton();
+        }, 0);
+    }
+
+    function startPromptEditorFeature() {
+        document.addEventListener('click', schedulePromptMenuCheck);
+        window.addEventListener('popstate', schedulePromptMenuCheck);
+        window.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') closePromptEditor();
+        });
+        schedulePromptMenuCheck();
+        setTimeout(schedulePromptMenuCheck, 500);
+        setTimeout(schedulePromptMenuCheck, 1500);
+        setTimeout(schedulePromptMenuCheck, 3000);
+    }
+
+    if (document.readyState === 'loading') {
+        document.addEventListener('DOMContentLoaded', startPromptEditorFeature, { once: true });
+    } else {
+        startPromptEditorFeature();
     }
 })();
