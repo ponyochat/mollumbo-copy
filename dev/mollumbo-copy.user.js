@@ -550,9 +550,20 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         }
     }
 
-    async function waitForStorySave(storyId, previousVersionKey) {
+    function storySaveRequestCount(iframe, storyId) {
+        try {
+            return iframe.contentWindow.performance.getEntriesByType('resource').filter(
+                (entry) => String(entry.name).includes(`/crack-api/stories/${storyId}/v2`)
+            ).length;
+        } catch {
+            return 0;
+        }
+    }
+
+    async function waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount) {
         for (let attempt = 0; attempt < 30; attempt += 1) {
             await new Promise((resolve) => setTimeout(resolve, 500));
+            if (storySaveRequestCount(iframe, storyId) > previousRequestCount) return true;
             const currentVersionKey = await myStoryVersionKey(storyId);
             if (currentVersionKey && currentVersionKey !== previousVersionKey) return true;
         }
@@ -579,6 +590,86 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             const rect = button.getBoundingClientRect();
             return rect.width > 0 && rect.height > 0 && !button.disabled;
         }) ?? null;
+    }
+
+    function watchStorySaveRequest(iframe, storyId) {
+        try {
+            const frameWindow = iframe.contentWindow;
+            const originalFetch = frameWindow?.fetch;
+            if (!frameWindow || typeof originalFetch !== 'function') return null;
+
+            let resolveSave;
+            let finished = false;
+            const promise = new Promise((resolve) => {
+                resolveSave = resolve;
+            });
+            const finish = (saved) => {
+                if (finished) return;
+                finished = true;
+                resolveSave(saved);
+            };
+            const wrappedFetch = async (...args) => {
+                const input = args[0];
+                const options = args[1];
+                const url = String(typeof input === 'string' ? input : input?.url ?? input ?? '');
+                const method = String(options?.method ?? input?.method ?? 'GET').toUpperCase();
+                try {
+                    const response = await originalFetch.apply(frameWindow, args);
+                    if (
+                        method === 'PATCH'
+                        && url.includes(`/crack-api/stories/${storyId}/v2`)
+                    ) {
+                        finish(response.ok);
+                    }
+                    return response;
+                } catch (error) {
+                    if (
+                        method === 'PATCH'
+                        && url.includes(`/crack-api/stories/${storyId}/v2`)
+                    ) {
+                        finish(false);
+                    }
+                    throw error;
+                }
+            };
+            frameWindow.fetch = wrappedFetch;
+
+            const xhrPrototype = frameWindow.XMLHttpRequest?.prototype;
+            const originalOpen = xhrPrototype?.open;
+            const originalSend = xhrPrototype?.send;
+            let wrappedOpen = null;
+            let wrappedSend = null;
+            if (typeof originalOpen === 'function' && typeof originalSend === 'function') {
+                wrappedOpen = function (method, url, ...rest) {
+                    this.__mollumboStorySaveRequest = (
+                        String(method).toUpperCase() === 'PATCH'
+                        && String(url).includes(`/crack-api/stories/${storyId}/v2`)
+                    );
+                    return originalOpen.call(this, method, url, ...rest);
+                };
+                wrappedSend = function (...args) {
+                    if (this.__mollumboStorySaveRequest) {
+                        this.addEventListener('loadend', () => {
+                            finish(this.status >= 200 && this.status < 300);
+                        }, { once: true });
+                    }
+                    return originalSend.apply(this, args);
+                };
+                xhrPrototype.open = wrappedOpen;
+                xhrPrototype.send = wrappedSend;
+            }
+
+            return {
+                promise,
+                restore() {
+                    if (frameWindow.fetch === wrappedFetch) frameWindow.fetch = originalFetch;
+                    if (xhrPrototype?.open === wrappedOpen) xhrPrototype.open = originalOpen;
+                    if (xhrPrototype?.send === wrappedSend) xhrPrototype.send = originalSend;
+                }
+            };
+        } catch {
+            return null;
+        }
     }
 
     function focusStorySettings(iframe) {
@@ -664,7 +755,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         const dialog = document.createElement('section');
         dialog.setAttribute('role', 'dialog');
         dialog.setAttribute('aria-modal', 'true');
-        dialog.setAttribute('aria-label', '버전 업그레이드 확인');
+        dialog.setAttribute('aria-label', '현재 채팅방 버전 업데이트 확인');
         dialog.style.cssText = [
             'width:min(420px,calc(100vw - 36px))',
             'padding:26px',
@@ -675,7 +766,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         ].join(';');
 
         const message = document.createElement('strong');
-        message.textContent = '버전 업그레이드 하시겠습니까?';
+        message.textContent = '현재 채팅방을 버전 업데이트 하시겠습니까?';
         message.style.cssText = 'display:block;font-size:18px;line-height:1.5;text-align:center';
 
         const description = document.createElement('p');
@@ -830,8 +921,20 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                 saveButton.disabled = true;
                 saveButton.textContent = '저장 중...';
                 saveButton.style.opacity = '0.65';
-                nativeModifyButton.click();
-                const saved = await waitForStorySave(storyId, previousVersionKey);
+                const previousRequestCount = storySaveRequestCount(iframe, storyId);
+                const saveWatcher = watchStorySaveRequest(iframe, storyId);
+                let saved = false;
+                try {
+                    nativeModifyButton.click();
+                    saved = saveWatcher
+                        ? await Promise.race([
+                            saveWatcher.promise,
+                            waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount)
+                        ])
+                        : await waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount);
+                } finally {
+                    saveWatcher?.restore();
+                }
                 if (!saved) {
                     saveButton.disabled = false;
                     saveButton.textContent = '수정';
