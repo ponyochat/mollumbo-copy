@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         몰름보 카피
 // @namespace    https://github.com/milkyway0308
-// @version      5.3
+// @version      5.4
 // @author       milkyway0308
 // @description  크랙 스토리 복사, 미디어 변경, 작품 잠금, 채팅 중 프롬프트 수정을 지원합니다.
 // @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
@@ -9,6 +9,7 @@
 // @match        https://crack.wrtn.ai/*
 // @connect      d394jeh9729epj.cloudfront.net
 // @connect      cdn-image.static.wrtn.ai
+// @connect      wrtn-image-ai-character.static.wrtn.ai
 // @grant        GM_addStyle
 // @grant        GM_getResourceURL
 // @grant        GM_xmlhttpRequest
