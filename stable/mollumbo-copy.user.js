@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         몰름보 카피
 // @namespace    https://github.com/milkyway0308
-// @version      5.4
+// @version      5.4.1
 // @author       milkyway0308
 // @description  크랙 스토리 복사, 미디어 변경, 작품 잠금, 채팅 중 프롬프트 수정을 지원합니다.
 // @updateURL    https://raw.githubusercontent.com/ponyochat/mollumbo-copy/refs/heads/main/stable/mollumbo-copy.user.js
@@ -551,22 +551,27 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         }
     }
 
-    function storySaveRequestCount(iframe, storyId) {
-        try {
-            return iframe.contentWindow.performance.getEntriesByType('resource').filter(
-                (entry) => String(entry.name).includes(`/crack-api/stories/${storyId}/v2`)
-            ).length;
-        } catch {
-            return 0;
-        }
-    }
-
-    async function waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount) {
-        for (let attempt = 0; attempt < 30; attempt += 1) {
+    async function waitForStorySave(storyId, previousVersionKey, iframe, watcher, isActive = () => true) {
+        let sawConfirmation = false;
+        let cancelChecks = 0;
+        for (let attempt = 0; attempt < 30;) {
             await new Promise((resolve) => setTimeout(resolve, 500));
-            if (storySaveRequestCount(iframe, storyId) > previousRequestCount) return true;
+            if (!isActive() || iframe.isConnected === false) return null;
+            const confirmationOpen = Array.from(iframe.contentDocument?.querySelectorAll('[role="dialog"]') ?? []).some(
+                (dialog) => Array.from(dialog.querySelectorAll('h1, h2, h3')).some(
+                    (heading) => normalizePromptLabel(heading.textContent) === '업데이트 확인'
+                )
+            );
+            if (confirmationOpen && !watcher?.started) {
+                sawConfirmation = true;
+                continue;
+            }
+            attempt += 1;
+            // 요청이 끝났다는 사실만으로 성공으로 보지 않고, 실제 저장 버전을 확인합니다.
             const currentVersionKey = await myStoryVersionKey(storyId);
             if (previousVersionKey && currentVersionKey && currentVersionKey !== previousVersionKey) return true;
+            // 사이트가 미리 보관한 fetch를 쓰면 감시를 지나칠 수 있으므로 저장 결과를 먼저 확인합니다.
+            if (sawConfirmation && watcher && !watcher.started && ++cancelChecks >= 6) return null;
         }
         return false;
     }
@@ -663,6 +668,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
             let resolveSave;
             let finished = false;
+            let started = false;
             const promise = new Promise((resolve) => {
                 resolveSave = resolve;
             });
@@ -676,6 +682,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                 const options = args[1];
                 const url = String(typeof input === 'string' ? input : input?.url ?? input ?? '');
                 const method = String(options?.method ?? input?.method ?? 'GET').toUpperCase();
+                if (method === 'PATCH' && url.includes(`/crack-api/stories/${storyId}/v2`)) started = true;
                 try {
                     const response = await originalFetch.apply(frameWindow, args);
                     if (
@@ -712,6 +719,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                 };
                 wrappedSend = function (...args) {
                     if (this.__mollumboStorySaveRequest) {
+                        started = true;
                         this.addEventListener('loadend', () => {
                             finish(this.status >= 200 && this.status < 300);
                         }, { once: true });
@@ -724,6 +732,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
 
             return {
                 promise,
+                get started() { return started; },
                 restore() {
                     if (frameWindow.fetch === wrappedFetch) frameWindow.fetch = originalFetch;
                     if (xhrPrototype?.open === wrappedOpen) xhrPrototype.open = originalOpen;
@@ -738,7 +747,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
     function focusStorySettings(iframe) {
         try {
             const frameDocument = iframe.contentDocument;
-            const storySettings = Array.from(frameDocument?.querySelectorAll?.('button') ?? []).find(
+            const storySettings = Array.from(frameDocument?.querySelectorAll?.('button, a') ?? []).find(
                 (button) => normalizePromptLabel(button.textContent).startsWith('스토리 설정')
             );
             storySettings?.click();
@@ -904,13 +913,25 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             'box-shadow:0 24px 70px rgba(0,0,0,.38)'
         ].join(';');
 
-        const saveTrigger = document.createElement('button');
-        saveTrigger.type = 'button';
-        saveTrigger.textContent = '수정';
+        const saveTrigger = createDialogButton('수정', true);
+        const mobileActions = document.createElement('div');
+        mobileActions.id = 'mollumbo-prompt-editor-mobile-actions';
+        const mobileClose = createDialogButton('닫기');
+        mobileActions.append(saveTrigger, mobileClose);
+        const mobileStyle = document.createElement('style');
+        mobileStyle.textContent = `
+            #mollumbo-prompt-editor-mobile-actions { display:none; }
+            @media (max-width:640px) {
+                #mollumbo-prompt-editor-mobile-actions {
+                    display:flex; flex:0 0 auto; justify-content:flex-end;
+                    gap:8px; padding:8px; border-bottom:1px solid #ddd;
+                }
+            }
+        `;
 
         const iframe = document.createElement('iframe');
         iframe.title = '스토리 설정 편집 화면';
-        iframe.src = `/builder/story?storyId=${encodeURIComponent(storyId)}&type=edit`;
+        iframe.src = `/builder/story?storyId=${encodeURIComponent(storyId)}&type=edit&step=detail`;
         iframe.style.cssText = 'width:100%;height:100%;border:0;background:#fff';
 
         let controlObserver = null;
@@ -928,6 +949,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             stopControlSync();
             closePromptEditor();
         };
+        mobileClose.addEventListener('click', closeEditor);
 
         const setSavingState = (saving) => {
             saveTrigger.disabled = saving;
@@ -1044,6 +1066,10 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                 if (inlineSave.parentElement !== host || inlineClose.parentElement !== host) {
                     host.append(inlineSave, inlineClose);
                 }
+                // 작은 화면에서는 크랙의 헤더 폭 밖으로 닫기 버튼이 밀립니다.
+                const controlDisplay = window.innerWidth <= 640 ? 'none' : 'inline-flex';
+                inlineSave.style.display = controlDisplay;
+                inlineClose.style.display = controlDisplay;
                 setSavingState(saveTrigger.disabled);
             } catch {
                 // 편집 화면이 그려지는 중이면 다음 화면 변화 때 다시 시도합니다.
@@ -1113,9 +1139,9 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                     alert('저장 전 작품 버전을 확인하지 못했습니다. 잠시 후 다시 눌러 주세요.');
                     return;
                 }
-                const previousRequestCount = storySaveRequestCount(iframe, storyId);
                 const saveWatcher = watchStorySaveRequest(iframe, storyId);
                 let saved = false;
+                let waiting = true;
                 try {
                     nativeModifyButton.click();
                     await new Promise((resolve) => setTimeout(resolve, 100));
@@ -1123,12 +1149,17 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
                     saved = saveWatcher
                         ? await Promise.race([
                             saveWatcher.promise,
-                            waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount)
+                            waitForStorySave(storyId, previousVersionKey, iframe, saveWatcher, () => waiting)
                         ])
-                        : await waitForStorySave(storyId, previousVersionKey, iframe, previousRequestCount);
+                        : await waitForStorySave(storyId, previousVersionKey, iframe, null, () => waiting);
                 } finally {
+                    waiting = false;
                     nativeModifyControl.restore();
                     saveWatcher?.restore();
+                }
+                if (saved === null) {
+                    if (overlay.isConnected) setSavingState(false);
+                    return;
                 }
                 if (!saved) {
                     setSavingState(false);
@@ -1146,7 +1177,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
             if (event.target === overlay) closeEditor();
         });
 
-        panel.append(iframe);
+        panel.append(mobileStyle, mobileActions, iframe);
         overlay.append(panel);
         document.body.append(overlay);
     }
@@ -1212,6 +1243,7 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
         );
         if (!guideItem) return;
         if (!await isMyStory(storyId) || storyIdFromChatPath() !== storyId) return;
+        if (document.getElementById(PROMPT_BUTTON_ID) || !guideItem.isConnected) return;
 
         const promptButton = createPromptMenuButton(guideItem, storyId);
         guideItem.before(promptButton);
@@ -1227,6 +1259,9 @@ ${a.slice(0,4e3)}`,1e4),console.error(o);}}function Ze(n){const t=Fe().articleLi
     }
 
     function startPromptEditorFeature() {
+        // 크랙은 새로고침 없이 채팅과 설정 메뉴를 뒤늦게 렌더링합니다.
+        const menuObserver = new MutationObserver(schedulePromptMenuCheck);
+        menuObserver.observe(document.body, { childList: true, subtree: true });
         document.addEventListener('click', schedulePromptMenuCheck);
         window.addEventListener('popstate', schedulePromptMenuCheck);
         window.addEventListener('keydown', (event) => {
